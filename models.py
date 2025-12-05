@@ -82,6 +82,7 @@ class PVFeatureExtractorWithPDFormer(nn.Module):
         self.feature_dim = len(config.PV_FEATURE_COLS) + 4  # 13 (9个特征 + 4个时间编码)
         self.hidden_dim = config.PD_D_MODEL  # 64
         self.output_dim = config.PV_OUTPUT_DIM  # 64
+        self.lape_dim = 8  # Laplacian Positional Encoding dimension
 
         # --- 1. 构建 PDFormer data_feature ---
         adj_mx = np.zeros((1, 1), dtype=np.float32)
@@ -118,7 +119,7 @@ class PVFeatureExtractorWithPDFormer(nn.Module):
             'device': torch.device(config.DEVICE),
             'add_time_in_day': False,
             'add_day_in_week': False,
-            'lape_dim': 8,
+            'lape_dim': self.lape_dim,  # 设置 lape_dim
             'type_short_path': 'hop',
             # 添加 max_len 参数
             'max_len': 300
@@ -142,7 +143,6 @@ class PVFeatureExtractorWithPDFormer(nn.Module):
             nn.Dropout(config.PD_DROPOUT)
         )
 
-    # 可以考虑稍微调整一下注释，使逻辑更清晰
     def forward(self, x):
         """
         Args:
@@ -154,8 +154,14 @@ class PVFeatureExtractorWithPDFormer(nn.Module):
         x_reshaped = x.unsqueeze(2)  # (B, 288, 1, 13)
         batch_dict = {'X': x_reshaped}
 
+        # [关键修复] 创建虚拟的 Laplacian Positional Encoding 矩阵
+        # PDFormer 期望 lap_mx 形状为 (num_nodes, lape_dim)，即 (1, 8)
+        # 因为只有一个节点，没有空间关系，所以全0即可，但必须是 Tensor
+        lap_mx = torch.zeros((1, self.lape_dim), dtype=torch.float32).to(x.device)
+
         # 2. PDFormer 特征提取: (B, 288, 1, 13)
-        pd_out = self.pdformer(batch_dict)
+        # 必须传入 lap_mx，否则 DataEmbedding 中的 Linear 层会报错
+        pd_out = self.pdformer(batch_dict, lap_mx=lap_mx)
 
         # 3. 维度重塑: (B, 288, 1, 13) -> (B, 288, 13)
         pd_out = pd_out.squeeze(2)
@@ -182,12 +188,12 @@ class WeatherForecastMapper(nn.Module):
     输入: 未来1天的天气预报 (batch, 24, 5)
     输出: 96条特征向量 (batch, 96, output_dim)
     """
-    
+
     def __init__(self, input_dim, hidden_dim, num_layers, output_dim, upsample_factor=4):
         super(WeatherForecastMapper, self).__init__()
-        
+
         self.upsample_factor = upsample_factor
-        
+
         # LSTM提取天气特征
         self.lstm = nn.LSTM(
             input_size=input_dim,
@@ -196,7 +202,7 @@ class WeatherForecastMapper(nn.Module):
             batch_first=True,
             dropout=0.2 if num_layers > 1 else 0
         )
-        
+
         # 上采样网络 (24 -> 96)
         # 使用转置卷积进行上采样
         self.upsample = nn.Sequential(
@@ -206,14 +212,14 @@ class WeatherForecastMapper(nn.Module):
             nn.Conv1d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
             nn.ReLU()
         )
-        
+
         # 输出投影层
         self.output_proj = nn.Sequential(
             nn.Linear(hidden_dim, output_dim),
             nn.ReLU(),
             nn.Dropout(0.1)
         )
-    
+
     def forward(self, x):
         """
         Args:
@@ -223,19 +229,19 @@ class WeatherForecastMapper(nn.Module):
         """
         # LSTM特征提取
         lstm_out, _ = self.lstm(x)  # (batch, 24, hidden_dim)
-        
+
         # 转置以进行上采样 (batch, hidden_dim, 24)
         lstm_out = lstm_out.transpose(1, 2)
-        
+
         # 上采样到96个时间步 (batch, hidden_dim, 96)
         upsampled = self.upsample(lstm_out)
-        
+
         # 转置回来 (batch, 96, hidden_dim)
         upsampled = upsampled.transpose(1, 2)
-        
+
         # 输出投影 (batch, 96, output_dim)
         output = self.output_proj(upsampled)
-        
+
         return output
 
 
@@ -245,14 +251,14 @@ class FeatureFusionPredictor(nn.Module):
     输入: 光伏特征 + 天气特征 (batch, 96, pv_dim + weather_dim)
     输出: 未来1天的PV预测 (batch, 96, 1)
     """
-    
+
     def __init__(self, input_dim, hidden_dims, dropout=0.2):
         super(FeatureFusionPredictor, self).__init__()
-        
+
         # 构建MLP网络
         layers = []
         prev_dim = input_dim
-        
+
         for hidden_dim in hidden_dims:
             layers.extend([
                 nn.Linear(prev_dim, hidden_dim),
@@ -261,12 +267,12 @@ class FeatureFusionPredictor(nn.Module):
                 nn.Dropout(dropout)
             ])
             prev_dim = hidden_dim
-        
+
         # 输出层
         layers.append(nn.Linear(prev_dim, 1))
-        
+
         self.mlp = nn.Sequential(*layers)
-    
+
     def forward(self, pv_features, weather_features):
         """
         Args:
@@ -277,10 +283,10 @@ class FeatureFusionPredictor(nn.Module):
         """
         # 拼接特征 (batch, 96, pv_dim + weather_dim)
         fused_features = torch.cat([pv_features, weather_features], dim=-1)
-        
+
         # MLP预测 (batch, 96, 1)
         output = self.mlp(fused_features)
-        
+
         return output
 
 
@@ -289,15 +295,15 @@ class PVPredictionModel(nn.Module):
     完整的光伏功率预测模型
     整合三个子模块：光伏特征提取、天气预报映射、特征融合预测
     """
-    
+
     def __init__(self, config):
         super(PVPredictionModel, self).__init__()
-        
+
         # 光伏特征提取模块
         # 输入维度：9个光伏特征 + 4个时间编码特征 = 13
         # 使用新的 PVFeatureExtractorWithPDFormer 替换原有的 LSTM 实现
         self.pv_extractor = PVFeatureExtractorWithPDFormer(config)
-        
+
         # 天气预报映射模块
         # 输入维度：5个天气特征
         self.weather_mapper = WeatherForecastMapper(
@@ -307,7 +313,7 @@ class PVPredictionModel(nn.Module):
             output_dim=config.WEATHER_OUTPUT_DIM,
             upsample_factor=config.UPSAMPLE_FACTOR
         )
-        
+
         # 特征融合预测模块
         # 输入维度：光伏特征维度 + 天气特征维度
         self.fusion_predictor = FeatureFusionPredictor(
@@ -315,7 +321,7 @@ class PVPredictionModel(nn.Module):
             hidden_dims=config.FUSION_HIDDEN_DIMS,
             dropout=config.FUSION_DROPOUT
         )
-    
+
     def forward(self, pv_data, weather_data):
         """
         Args:
@@ -326,15 +332,15 @@ class PVPredictionModel(nn.Module):
         """
         # 提取光伏特征 (batch, 96, pv_output_dim)
         pv_features = self.pv_extractor(pv_data)
-        
+
         # 映射天气特征 (batch, 96, weather_output_dim)
         weather_features = self.weather_mapper(weather_data)
-        
+
         # 融合特征并预测 (batch, 96, 1)
         predictions = self.fusion_predictor(pv_features, weather_features)
-        
+
         return predictions
-    
+
     def get_intermediate_features(self, pv_data, weather_data):
         """
         获取中间特征（用于可视化和分析）
@@ -344,5 +350,5 @@ class PVPredictionModel(nn.Module):
         pv_features = self.pv_extractor(pv_data)
         weather_features = self.weather_mapper(weather_data)
         predictions = self.fusion_predictor(pv_features, weather_features)
-        
+
         return pv_features, weather_features, predictions

@@ -66,6 +66,7 @@ class DataEmbedding(nn.Module):
     def __init__(
         self, feature_dim, embed_dim, lape_dim, adj_mx, drop=0.,
         add_time_in_day=False, add_day_in_week=False, device=torch.device('cpu'),
+        max_len=100
     ):
         super().__init__()
 
@@ -77,7 +78,7 @@ class DataEmbedding(nn.Module):
         self.feature_dim = feature_dim
         self.value_embedding = TokenEmbedding(feature_dim, embed_dim)
 
-        self.position_encoding = PositionalEncoding(embed_dim)
+        self.position_encoding = PositionalEncoding(embed_dim, max_len=max_len)
         if self.add_time_in_day:
             self.minute_size = 1440
             self.daytime_embedding = nn.Embedding(self.minute_size, embed_dim)
@@ -384,9 +385,11 @@ class PDFormer(AbstractTrafficStateModel):
             TokenEmbedding(self.s_attn_size, self.embed_dim) for _ in range(self.output_dim)
         ])
 
+        max_len = config.get('max_len', 100)
         self.enc_embed_layer = DataEmbedding(
             self.feature_dim - self.ext_dim, self.embed_dim, lape_dim, self.adj_mx, drop=drop,
             add_time_in_day=add_time_in_day, add_day_in_week=add_day_in_week, device=self.device,
+            max_len=max_len
         )
 
         enc_dpr = [x.item() for x in torch.linspace(0, drop_path, enc_depth)]
