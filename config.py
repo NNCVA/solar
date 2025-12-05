@@ -32,18 +32,17 @@ class Config:
     # =================================================
     # 模型参数
     # 1. 光伏特征提取模块
-    PV_HIDDEN_DIM = 128  # LSTM隐藏层维度
-    PV_NUM_LAYERS = 2  # LSTM层数
-    PV_OUTPUT_DIM = 64  # 输出特征维度
+    # PV_HIDDEN_DIM = 128  # LSTM隐藏层维度
+    # PV_NUM_LAYERS = 2  # LSTM层数
 
-    # PDFormer参数
-    PD_D_MODEL = 64  # PDFormer 的嵌入维度
-    PD_S_ATTN_SIZE = 3  # 空间注意力大小
-    PD_T_ATTN_SIZE = 3  # 时间注意力大小
-    PD_GEO_NUM_HEADS = 4  # 地理注意力头数
-    PD_SEM_NUM_HEADS = 2  # 语义注意力头数
-    PD_T_NUM_HEADS = 2  # 时间注意力头数
-    PD_ENC_DEPTH = 3  # PDFormer 的编码层数
+    # --- PDFormer 专用配置 ---
+    PD_D_MODEL = 64  # PDFormer 内部 Embedding 维度
+    PD_N_HEADS = 4  # 多头注意力头数
+    PD_N_LAYERS = 2  # Encoder 层数
+    PD_DROPOUT = 0.1  # Dropout 比率
+    PD_S_ATTN_SIZE = 3  # 空间/模式注意力的窗口大小
+
+    PV_OUTPUT_DIM = 64  # 最终输出特征维度 (保持不变)
 
     # 2. 天气预报映射模块
     WEATHER_HIDDEN_DIM = 64  # LSTM隐藏层维度

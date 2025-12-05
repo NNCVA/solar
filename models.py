@@ -1,7 +1,7 @@
 """
 模型定义 - 包含三个核心模块和完整的预测模型
 """
-
+import numpy as np
 import torch
 import torch.nn as nn
 from model.traffic_flow_prediction.PDFormer import PDFormer
@@ -69,90 +69,108 @@ class PVFeatureExtractor(nn.Module):
 
 
 class PVFeatureExtractorWithPDFormer(nn.Module):
-    """ 光伏特征提取模块 使用 PDFormer 替代 LSTM
-    输入: 过去3天的光伏数据 (batch, 288, 13)
-    输出: 96条特征向量 (batch, 96, output_dim)
+    """
+    基于 PDFormer 的光伏特征提取模块
+    输入: (batch, 288, 13)
+    输出: (batch, 96, output_dim)
     """
 
-    def __init__(self, input_dim, hidden_dim, num_layers, output_dim, config):
+    def __init__(self, config):
         super(PVFeatureExtractorWithPDFormer, self).__init__()
-        self.input_dim = input_dim
-        self.output_dim = output_dim
-        self.config = config
 
-        # 将输入特征映射到 PDFormer 的嵌入维度
-        self.input_proj = nn.Linear(input_dim, config.PD_D_MODEL)
+        self.input_len = config.PV_SAMPLES_PER_DAY * config.LOOKBACK_DAYS  # 288
+        self.feature_dim = len(config.PV_FEATURE_COLS) + 4  # 13 (9个特征 + 4个时间编码)
+        self.hidden_dim = config.PD_D_MODEL  # 64
+        self.output_dim = config.PV_OUTPUT_DIM  # 64
 
-        # 创建 PDFormer 实例
-        self.pdformer = PDFormer(
-            config=type('Config', (), {
-                'embed_dim': config.PD_D_MODEL,
-                's_attn_size': config.PD_S_ATTN_SIZE,
-                't_attn_size': config.PD_T_ATTN_SIZE,
-                'geo_num_heads': config.PD_GEO_NUM_HEADS,
-                'sem_num_heads': config.PD_SEM_NUM_HEADS,
-                't_num_heads': config.PD_T_NUM_HEADS,
-                'enc_depth': config.PD_ENC_DEPTH,
-                'output_dim': config.PD_D_MODEL,  # 输出维度为 PD_D_MODEL
-                'input_window': 288,
-                'output_window': 288,
-                'device': 'cpu'
-            }),
-            data_feature={
-                'num_nodes': 1,
-                'feature_dim': config.PD_D_MODEL,
-                'ext_dim': 0,
-                'num_batches': 1
-            }
-        )
+        # --- 1. 构建 PDFormer data_feature ---
+        adj_mx = np.zeros((1, 1), dtype=np.float32)
+        dtw_matrix = np.zeros((1, 1), dtype=np.float32)
+        sd_mx = np.zeros((1, 1), dtype=np.float32)
+        sh_mx = np.zeros((1, 1), dtype=np.float32)
+        pattern_keys = np.zeros((1, config.PD_S_ATTN_SIZE, self.hidden_dim), dtype=np.float32)
 
-        # 1D卷积进行下采样 (288 -> 96)
-        self.conv = nn.Sequential(
-            nn.Conv1d(config.PD_D_MODEL, config.PD_D_MODEL, kernel_size=3, stride=3, padding=0),
-            nn.ReLU(),
-            nn.BatchNorm1d(config.PD_D_MODEL)
-        )
-
-        # 输出投影层
-        self.output_proj = nn.Sequential(
-            nn.Linear(config.PD_D_MODEL, output_dim),
-            nn.ReLU(),
-            nn.Dropout(0.1)
-        )
-
-    def forward(self, x):
-        """ Args:
-            x: (batch, 288, 13) - 过去3天的光伏数据
-        Returns:
-            (batch, 96, output_dim) - 96条特征向量
-        """
-        # (batch, 288, 13) -> (batch, 288, PD_D_MODEL)
-        x = self.input_proj(x)
-
-        # PDFormer 需要特定格式的输入
-        # PDFormer 需要 'X' 键的 batch，形状为 (batch, input_window, num_nodes, feature_dim)
-        # 由于我们只有一个光伏点，num_nodes = 1
-        batch = {
-            'X': x.unsqueeze(2)  # (batch, 288, 1, PD_D_MODEL)
+        data_feature = {
+            'adj_mx': adj_mx,
+            'num_nodes': 1,
+            'feature_dim': self.feature_dim,
+            'dtw_matrix': dtw_matrix,
+            'sd_mx': sd_mx,
+            'sh_mx': sh_mx,
+            'pattern_keys': pattern_keys,
+            # 添加 max_len 参数
+            'max_len': 300
         }
 
-        # 使用 PDFormer 提取特征
-        # 输出形状: (batch, 288, 1, PD_D_MODEL)
-        pdformer_out = self.pdformer(batch)
+        # --- 2. PDFormer 配置 ---
+        pd_config = {
+            'embed_dim': self.hidden_dim,
+            # [关键修改1] output_dim 必须等于特征数量 (13)，不能是 64
+            'output_dim': self.feature_dim,
+            'input_window': self.input_len,
+            'output_window': self.input_len,
+            'enc_depth': config.PD_N_LAYERS,
+            'geo_num_heads': config.PD_N_HEADS,
+            'sem_num_heads': 2,
+            't_num_heads': 2,
+            's_attn_size': config.PD_S_ATTN_SIZE,
+            'drop': config.PD_DROPOUT,
+            'device': torch.device(config.DEVICE),
+            'add_time_in_day': False,
+            'add_day_in_week': False,
+            'lape_dim': 8,
+            'type_short_path': 'hop',
+            # 添加 max_len 参数
+            'max_len': 300
+        }
 
-        # 转换为 (batch, 288, PD_D_MODEL)
-        pdformer_out = pdformer_out.squeeze(2)  # (batch, 288, PD_D_MODEL)
+        self.pdformer = PDFormer(pd_config, data_feature)
 
-        # 转置以进行1D卷积 (batch, PD_D_MODEL, 288)
-        pdformer_out = pdformer_out.transpose(1, 2)
+        # [关键修改2] 新增一个投影层，将 PDFormer 输出的 13 维映射回 hidden_dim (64)
+        self.feature_proj = nn.Linear(self.feature_dim, self.hidden_dim)
 
-        # 下采样到96个时间步 (batch, PD_D_MODEL, 96)
-        conv_out = self.conv(pdformer_out)
+        # --- 3. 后处理模块 ---
+        self.conv = nn.Sequential(
+            nn.Conv1d(self.hidden_dim, self.hidden_dim, kernel_size=3, stride=3, padding=0),
+            nn.ReLU(),
+            nn.BatchNorm1d(self.hidden_dim)
+        )
 
-        # 转置回来 (batch, 96, PD_D_MODEL)
+        self.output_proj = nn.Sequential(
+            nn.Linear(self.hidden_dim, self.output_dim),
+            nn.ReLU(),
+            nn.Dropout(config.PD_DROPOUT)
+        )
+
+    # 可以考虑稍微调整一下注释，使逻辑更清晰
+    def forward(self, x):
+        """
+        Args:
+            x: (batch, 288, 13) - 输入光伏数据
+        Returns:
+            output: (batch, 96, 64) - 处理后的特征向量
+        """
+        # 1. 适配输入格式: (B, T, F) -> (B, T, N=1, F)
+        x_reshaped = x.unsqueeze(2)  # (B, 288, 1, 13)
+        batch_dict = {'X': x_reshaped}
+
+        # 2. PDFormer 特征提取: (B, 288, 1, 13)
+        pd_out = self.pdformer(batch_dict)
+
+        # 3. 维度重塑: (B, 288, 1, 13) -> (B, 288, 13)
+        pd_out = pd_out.squeeze(2)
+
+        # 4. 特征维度投影: (B, 288, 13) -> (B, 288, 64)
+        pd_out = self.feature_proj(pd_out)
+
+        # 5. 准备卷积下采样: (B, 288, 64) -> (B, 64, 288)
+        pd_out = pd_out.permute(0, 2, 1)
+
+        # 6. 卷积下采样: (B, 64, 288) -> (B, 64, 96)
+        conv_out = self.conv(pd_out)
+
+        # 7. 维度还原和最终投影: (B, 64, 96) -> (B, 96, 64)
         conv_out = conv_out.transpose(1, 2)
-
-        # 输出投影 (batch, 96, output_dim)
         output = self.output_proj(conv_out)
 
         return output
@@ -277,14 +295,8 @@ class PVPredictionModel(nn.Module):
         
         # 光伏特征提取模块
         # 输入维度：9个光伏特征 + 4个时间编码特征 = 13
-        # 改用PDFormer作为光伏特征提取模块的模型
-        self.pv_extractor = PVFeatureExtractorWithPDFormer(
-            input_dim=len(config.PV_FEATURE_COLS) + 4,  # 13
-            hidden_dim=config.PV_HIDDEN_DIM,
-            num_layers=config.PV_NUM_LAYERS,
-            output_dim=config.PV_OUTPUT_DIM,
-            config=config
-        )
+        # 使用新的 PVFeatureExtractorWithPDFormer 替换原有的 LSTM 实现
+        self.pv_extractor = PVFeatureExtractorWithPDFormer(config)
         
         # 天气预报映射模块
         # 输入维度：5个天气特征
