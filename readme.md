@@ -1,22 +1,22 @@
 # 光伏功率预测系统
 
-基于深度学习的光伏功率预测系统,使用过去3天的光伏数据和未来1天的天气预报数据,预测未来1天(96个15分钟数据点)的光伏功率。
+基于深度学习的光伏功率预测系统，使用过去3天的光伏数据和未来1天的天气预报数据，预测未来1天(96个15分钟数据点)的光伏功率。
 
 ## 系统架构
 
-系统由三个核心模块组成:
+系统由三个核心模块组成：
 
-1. **光伏特征提取模块** (PVFeatureExtractor)
-   - 使用LSTM提取过去3天光伏数据的时序特征
+1. **光伏特征提取模块** ([PVFeatureExtractorWithPDFormer](file://D:\pycharm\py_project\UV3\code(Claude)\models.py#L9-L67))
+   - 使用PDFormer（一种先进的时空注意力模型）提取过去3天光伏数据的时序特征
    - 通过1D卷积下采样从288个时间步到96个时间步
    - 输出96条特征向量用于后续融合
 
-2. **天气预报映射模块** (WeatherForecastMapper)
+2. **天气预报映射模块** ([WeatherForecastMapper](file://D:\pycharm\py_project\UV3\code(Claude)\models.py#L184-L244))
    - 使用LSTM处理24小时天气预报数据
    - 通过转置卷积上采样从24个时间步到96个时间步
    - 将小时级数据映射为15分钟级数据
 
-3. **特征融合预测模块** (FeatureFusionPredictor)
+3. **特征融合预测模块** ([FeatureFusionPredictor](file://D:\pycharm\py_project\UV3\code(Claude)\models.py#L247-L289))
    - 使用多层感知机(MLP)融合光伏特征和天气特征
    - 输出未来一天96个时间点的光伏功率预测
 
@@ -24,20 +24,30 @@
 
 ```
 .
-├── config.py           # 配置文件(模型参数、训练参数等)
-├── data_loader.py      # 数据加载和预处理模块
-├── models.py           # 模型定义(三个核心模块)
-├── train.py            # 训练脚本
-├── predict.py          # 预测和评估脚本
-├── README.md           # 使用说明
-├── pv_data.csv         # 光伏数据(需准备)
-├── weather_forecast.csv # 天气预报数据(需准备)
-└── saved_models/       # 模型保存目录(自动创建)
+├── config.py                    # 配置文件(模型参数、训练参数等)
+├── data_loader.py               # 数据加载和预处理模块
+├── models.py                    # 模型定义(三个核心模块)
+├── train.py                     # 训练脚本
+├── predict.py                   # 预测和评估脚本
+├── readme.md                    # 使用说明
+├── p2_long_knn.csv              # 光伏数据(需准备)
+├── nwp.csv                      # 天气预报数据(需准备)
+├── saved_models_pd/             # 模型保存目录(自动创建)
+│   ├── best_model.pth           # 最佳模型权重
+│   ├── scalers.pkl              # 数据标准化器
+│   ├── training_curves.png      # 训练曲线
+│   ├── predictions.csv          # 测试集预测结果
+│   ├── predictions_samples.png  # 样本预测对比图
+│   └── error_analysis.png       # 误差分析图
+└── model/
+    └── traffic_flow_prediction/
+        └── PDFormer.py          # PDFormer模型实现
 ```
+
 
 ## 数据格式要求
 
-### 1. 光伏数据 (pv_data.csv)
+### 1. 光伏数据 (p2_long_knn.csv)
 
 **采样频率**: 15分钟  
 **时间范围**: 2023-01-01 到 2024-05-30  
@@ -59,7 +69,7 @@
 - `minute_of_day`: 一天中的分钟数(0-1439)
 - `day_of_week`: 星期几(0-6)
 
-### 2. 天气预报数据 (weather_forecast.csv)
+### 2. 天气预报数据 (nwp.csv)
 
 **采样频率**: 1小时  
 **每天记录数**: 24条
@@ -78,17 +88,18 @@
 pip install torch numpy pandas scikit-learn matplotlib tqdm
 ```
 
+
 ## 使用方法
 
 ### 1. 配置参数
 
-在 `config.py` 中修改配置:
+在 [config.py](file://D:\pycharm\py_project\UV3\code(Claude)\config.py) 中修改配置:
 
 ```python
 class Config:
     # 数据路径
-    PV_DATA_PATH = 'pv_data.csv'
-    WEATHER_DATA_PATH = 'weather_forecast.csv'
+    PV_DATA_PATH = 'p2_long_knn.csv'
+    WEATHER_DATA_PATH = 'nwp.csv'
     
     # 模型参数
     BATCH_SIZE = 32
@@ -99,23 +110,20 @@ class Config:
     DEVICE = 'cuda'  # 或 'cpu'
 ```
 
+
 ### 2. 训练模型
 
 ```bash
 python train.py
 ```
 
+
 训练过程会:
 - 自动加载和预处理数据
-- 划分训练集、验证集和测试集(8:1:1)
+- 划分训练集、验证集和测试集(7:1.5:1.5)
 - 进行数据归一化并保存标准化器
 - 训练模型并保存最佳模型
 - 生成训练曲线图
-
-**输出文件**:
-- `saved_models/best_model.pth`: 最佳模型权重
-- `saved_models/scalers.pkl`: 数据标准化器
-- `saved_models/training_curves.png`: 训练曲线
 
 ### 3. 评估模型
 
@@ -123,16 +131,12 @@ python train.py
 python predict.py
 ```
 
+
 评估过程会:
 - 加载训练好的模型和标准化器
 - 在测试集上生成预测
 - 计算评估指标(MAE, RMSE, MAPE, R²)
 - 生成可视化结果
-
-**输出文件**:
-- `saved_models/predictions.csv`: 详细预测结果
-- `saved_models/predictions_samples.png`: 样本预测对比图
-- `saved_models/error_analysis.png`: 误差分析图
 
 ### 4. 自定义预测
 
@@ -145,13 +149,13 @@ from data_loader import PVDataProcessor
 # 加载配置和模型
 config = Config()
 model = PVPredictionModel(config)
-checkpoint = torch.load('saved_models/best_model.pth')
+checkpoint = torch.load('saved_models_pd/best_model.pth')
 model.load_state_dict(checkpoint['model_state_dict'])
 model.eval()
 
 # 加载标准化器
 processor = PVDataProcessor(config)
-processor.load_scalers('saved_models')
+processor.load_scalers('saved_models_pd')
 
 # 准备输入数据
 # pv_data: (batch, 288, 13) - 过去3天的光伏数据
@@ -175,21 +179,25 @@ predictions = processor.target_scaler.inverse_transform(
 ).reshape(96)
 ```
 
+
 ## 模型参数说明
 
-### 光伏特征提取模块
-- `PV_HIDDEN_DIM`: LSTM隐藏层维度(默认128)
-- `PV_NUM_LAYERS`: LSTM层数(默认2)
-- `PV_OUTPUT_DIM`: 输出特征维度(默认64)
+### 光伏特征提取模块（PDFormer）
+- [PD_D_MODEL](file://D:\pycharm\py_project\UV3\code(Claude)\config.py#L38-L38): PDFormer内部嵌入维度(默认64)
+- [PD_N_HEADS](file://D:\pycharm\py_project\UV3\code(Claude)\config.py#L39-L39): 多头注意力头数(默认4)
+- [PD_N_LAYERS](file://D:\pycharm\py_project\UV3\code(Claude)\config.py#L40-L40): 编码器层数(默认2)
+- [PD_DROPOUT](file://D:\pycharm\py_project\UV3\code(Claude)\config.py#L41-L41): Dropout比率(默认0.1)
+- [PD_S_ATTN_SIZE](file://D:\pycharm\py_project\UV3\code(Claude)\config.py#L42-L42): 空间/模式注意力窗口大小(默认3)
 
 ### 天气预报映射模块
-- `WEATHER_HIDDEN_DIM`: LSTM隐藏层维度(默认64)
-- `WEATHER_NUM_LAYERS`: LSTM层数(默认2)
-- `WEATHER_OUTPUT_DIM`: 输出特征维度(默认64)
+- [WEATHER_HIDDEN_DIM](file://D:\pycharm\py_project\UV3\code(Claude)\config.py#L47-L47): LSTM隐藏层维度(默认64)
+- [WEATHER_NUM_LAYERS](file://D:\pycharm\py_project\UV3\code(Claude)\config.py#L48-L48): LSTM层数(默认2)
+- [WEATHER_OUTPUT_DIM](file://D:\pycharm\py_project\UV3\code(Claude)\config.py#L49-L49): 输出特征维度(默认64)
+- [UPSAMPLE_FACTOR](file://D:\pycharm\py_project\UV3\code(Claude)\config.py#L50-L50): 上采样因子(默认4，即24→96)
 
 ### 特征融合预测模块
-- `FUSION_HIDDEN_DIMS`: MLP隐藏层维度列表(默认[256, 128, 64])
-- `FUSION_DROPOUT`: Dropout比率(默认0.2)
+- [FUSION_HIDDEN_DIMS](file://D:\pycharm\py_project\UV3\code(Claude)\config.py#L53-L53): MLP隐藏层维度列表(默认[256, 128, 64])
+- [FUSION_DROPOUT](file://D:\pycharm\py_project\UV3\code(Claude)\config.py#L54-L54): Dropout比率(默认0.2)
 
 ## 关键特性
 
@@ -200,7 +208,7 @@ predictions = processor.target_scaler.inverse_transform(
 - **序列对齐**: 确保光伏数据和天气预报的时间对齐
 
 ### 模型特性
-- **多尺度时序建模**: LSTM捕获长期依赖
+- **先进时空建模**: 使用PDFormer替代传统LSTM，具有更强的时空特征提取能力
 - **智能上/下采样**: 卷积网络实现时间分辨率转换
 - **特征融合**: MLP深度融合多源特征
 - **批归一化**: 提高训练稳定性
@@ -249,7 +257,7 @@ A: 可以尝试:
 
 系统设计灵活,便于扩展:
 
-1. **更换特征提取模块**: 可以使用Transformer或TCN替代LSTM
+1. **更换特征提取模块**: 可以使用其他先进的时序模型替代PDFormer
 2. **添加注意力机制**: 在融合模块中加入注意力权重
 3. **多步预测**: 扩展为预测多天的光伏功率
 4. **不确定性估计**: 使用贝叶斯神经网络或集成方法
